@@ -1,0 +1,19 @@
+{
+  "name": "http-vnc-proxy",
+  "version": "1.0.0",
+  "description": "HTTP-only VNC remote desktop proxy - MJPEG streaming + keyboard/mouse forwarding",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "install": "^0.13.0",
+    "sharp": "^0.33.0",
+    "uuid": "^10.0.0"
+  }
+}

@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HTTP-VNC Remote Desktop</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #0a0a0a; color: #e0e0e0; }
+
+    /* --- Top bar --- */
+    .topbar {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 16px; background: #1a1a2e; border-bottom: 1px solid #333;
+    }
+    .topbar .logo { font-size: 15px; font-weight: 700; color: #7f5af0; letter-spacing: 1px; }
+    .topbar .status { margin-left: auto; font-size: 12px; color: #888; }
+    .topbar .status.connected { color: #4caf50; }
+
+    /* --- Connection panel --- */
+    .connect-panel {
+      display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+      padding: 12px 16px; background: #16162a; border-bottom: 1px solid #222;
+    }
+    .connect-panel label { font-size: 12px; color: #aaa; margin-right: 4px; }
+    .connect-panel input, .connect-panel select {
+      background: #222; border: 1px solid #444; color: #eee; border-radius: 4px;
+      padding: 6px 10px; font-size: 13px; outline: none;
+    }
+    .connect-panel input:focus, .connect-panel select:focus { border-color: #7f5af0; }
+    .connect-panel input[type="password"] { width: 120px; }
+    .connect-panel input[type="text"] { width: 140px; }
+    .connect-panel input[type="number"] { width: 70px; }
+    .btn {
+      padding: 7px 16px; border: none; border-radius: 4px; font-size: 13px;
+      cursor: pointer; font-weight: 600; transition: background .15s;
+    }
+    .btn-connect { background: #7f5af0; color: #fff; }
+    .btn-connect:hover { background: #6b46d8; }
+    .btn-disconnect { background: #e53935; color: #fff; }
+    .btn-disconnect:hover { background: #c62828; }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* --- Screen container --- */
+    .screen-wrap {
+      display: flex; justify-content: center; align-items: center;
+      flex: 1; overflow: auto; background: #000; position: relative;
+    }
+    .screen-wrap img {
+      max-width: 100%; max-height: calc(100vh - 120px);
+      image-rendering: auto; display: block;
+    }
+    .screen-wrap .placeholder {
+      color: #555; font-size: 18px; text-align: center; padding: 40px;
+    }
+
+    /* --- Fullscreen mode --- */
+    .fullscreen .topbar, .fullscreen .connect-panel { display: none; }
+    .fullscreen .screen-wrap { position: fixed; inset: 0; z-index: 999; background: #000; }
+    .fullscreen .screen-wrap img { max-width: 100%; max-height: 100vh; }
+
+    /* --- Fullscreen toggle --- */
+    .fs-toggle {
+      position: absolute; top: 8px; right: 8px; z-index: 10;
+      background: rgba(0,0,0,.6); color: #fff; border: none; border-radius: 4px;
+      padding: 6px 10px; font-size: 12px; cursor: pointer; opacity: 0; transition: opacity .2s;
+    }
+    .screen-wrap:hover .fs-toggle { opacity: 1; }
+
+    /* --- Overlay messages --- */
+    .overlay {
+      position: absolute; inset: 0; display: flex; justify-content: center;
+      align-items: center; background: rgba(0,0,0,.7); z-index: 5;
+    }
+    .overlay .msg { font-size: 16px; color: #aaa; }
+    .overlay.error .msg { color: #e53935; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <span class="logo">HTTP-VNC</span>
+    <span class="status" id="statusText">未連接</span>
+  </div>
+
+  <div class="connect-panel" id="connectPanel">
+    <label>主機</label>
+    <input type="text" id="vncHost" placeholder="192.168.1.100">
+    <label>端口</label>
+    <input type="number" id="vncPort" value="5900" min="1" max="65535">
+    <label>密碼</label>
+    <input type="password" id="vncPassword" placeholder="可選">
+    <button class="btn btn-connect" id="btnConnect" onclick="doConnect()">連線</button>
+    <button class="btn btn-disconnect" id="btnDisconnect" onclick="doDisconnect()" disabled>斷線</button>
+    <span id="sessionInfo" style="font-size:12px;color:#666;margin-left:8px;"></span>
+  </div>
+
+  <div class="screen-wrap" id="screenWrap">
+    <div class="placeholder" id="placeholder">連線後即可操作遠程桌面</div>
+    <img id="remoteScreen" style="display:none;" alt="Remote Desktop">
+    <div class="overlay" id="overlay" style="display:none;">
+      <span class="msg" id="overlayMsg"></span>
+    </div>
+    <button class="fs-toggle" id="fsToggle" onclick="toggleFullscreen()">全螢幕</button>
+  </div>
+
+  <script>
+    let sessionId = null;
+    let isConnected = false;
+
+    const $ = id => document.getElementById(id);
+
+    // ---- Connection ----
+
+    async function doConnect() {
+      const host = $('vncHost').value.trim();
+      const port = parseInt($('vncPort').value) || 5900;
+      const password = $('vncPassword').value;
+
+      if (!host) { alert('請輸入主機地址'); return; }
+
+      $('btnConnect').disabled = true;
+      showOverlay('連線中...');
+
+      try {
+        const res = await fetch('/connect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host, port, password }),
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          showOverlay(data.error || '連線失敗', true);
+          $('btnConnect').disabled = false;
+          return;
+        }
+
+        sessionId = data.sessionId;
+        isConnected = true;
+
+        // Start MJPEG stream
+        $('placeholder').style.display = 'none';
+        $('overlay').style.display = 'none';
+        const img = $('remoteScreen');
+        img.src = `/stream?id=${sessionId}`;
+        img.style.display = 'block';
+        img.onerror = () => {
+          if (isConnected) showOverlay('畫面串流中斷', true);
+        };
+
+        updateUI();
+        $('sessionInfo').textContent = `${host}:${port} (${data.width}x${data.height})`;
+      } catch (err) {
+        showOverlay('連線失敗: ' + err.message, true);
+        $('btnConnect').disabled = false;
+      }
+    }
+
+    async function doDisconnect() {
+      if (!sessionId) return;
+
+      $('remoteScreen').src = '';
+      $('remoteScreen').style.display = 'none';
+
+      try {
+        await fetch('/disconnect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId }),
+        });
+      } catch (_) {}
+
+      sessionId = null;
+      isConnected = false;
+      $('placeholder').style.display = '';
+      $('overlay').style.display = 'none';
+      $('sessionInfo').textContent = '';
+      updateUI();
+    }
+
+    function updateUI() {
+      $('btnConnect').disabled = isConnected;
+      $('btnDisconnect').disabled = !isConnected;
+      $('statusText').textContent = isConnected ? '已連線' : '未連接';
+      $('statusText').className = isConnected ? 'status connected' : 'status';
+    }
+
+    function showOverlay(msg, isError = false) {
+      $('overlayMsg').textContent = msg;
+      $('overlay').className = isError ? 'overlay error' : 'overlay';
+      $('overlay').style.display = 'flex';
+    }
+
+    // ---- Fullscreen ----
+
+    function toggleFullscreen() {
+      document.body.classList.toggle('fullscreen');
+      const btn = $('fsToggle');
+      btn.textContent = document.body.classList.contains('fullscreen') ? '退出全螢幕' : '全螢幕';
+    }
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape' && document.body.classList.contains('fullscreen')) {
+        document.body.classList.remove('fullscreen');
+        $('fsToggle').textContent = '全螢幕';
+      }
+    });
+
+    // ---- Input forwarding ----
+
+    // Throttle: batch mousemove events, send every 30ms
+    let pendingMove = null;
+    setInterval(() => {
+      if (pendingMove && isConnected) {
+        sendInput('mousemove', pendingMove);
+        pendingMove = null;
+      }
+    }, 30);
+
+    function sendInput(type, data) {
+      if (!sessionId || !isConnected) return;
+      fetch('/input', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId, type, data }),
+      }).catch(() => {});
+    }
+
+    // Keyboard
+    document.addEventListener('keydown', e => {
+      if (!isConnected) return;
+      // Don't capture browser shortcuts
+      if (e.ctrlKey && ['w', 't', 'l', 'n'].includes(e.key.toLowerCase())) return;
+      if (e.key === 'F11') return;
+      // Allow Escape in fullscreen to exit
+      if (e.key === 'Escape' && document.body.classList.contains('fullscreen')) return;
+
+      e.preventDefault();
+      sendInput('keydown', { key: e.key, code: e.code });
+    });
+
+    document.addEventListener('keyup', e => {
+      if (!isConnected) return;
+      if (e.ctrlKey && ['w', 't', 'l', 'n'].includes(e.key.toLowerCase())) return;
+      if (e.key === 'Escape') return;
+      e.preventDefault();
+      sendInput('keyup', { key: e.key, code: e.code });
+    });
+
+    // Mouse - calculate position relative to the VNC image
+    function getRelativePos(e) {
+      const img = $('remoteScreen');
+      const rect = img.getBoundingClientRect();
+      const x = Math.round((e.clientX - rect.left) / rect.width * (img.naturalWidth || 800));
+      const y = Math.round((e.clientY - rect.top) / rect.height * (img.naturalHeight || 600));
+      return { x: Math.max(0, x), y: Math.max(0, y) };
+    }
+
+    $('remoteScreen').addEventListener('mousedown', e => {
+      if (!isConnected) return;
+      e.preventDefault();
+      const btnMap = { 0: 'left', 1: 'middle', 2: 'right' };
+      const pos = getRelativePos(e);
+      sendInput('mousedown', { button: btnMap[e.button] || 'left', x: pos.x, y: pos.y });
+    });
+
+    $('remoteScreen').addEventListener('mouseup', e => {
+      if (!isConnected) return;
+      e.preventDefault();
+      const btnMap = { 0: 'left', 1: 'middle', 2: 'right' };
+      const pos = getRelativePos(e);
+      sendInput('mouseup', { button: btnMap[e.button] || 'left', x: pos.x, y: pos.y });
+    });
+
+    $('remoteScreen').addEventListener('mousemove', e => {
+      if (!isConnected) return;
+      pendingMove = getRelativePos(e);
+    });
+
+    $('remoteScreen').addEventListener('wheel', e => {
+      if (!isConnected) return;
+      e.preventDefault();
+      const pos = getRelativePos(e);
+      sendInput('wheel', { deltaY: e.deltaY, x: pos.x, y: pos.y });
+    });
+
+    // Prevent context menu on remote screen
+    $('remoteScreen').addEventListener('contextmenu', e => e.preventDefault());
+  </script>
+</body>
+</html>
